@@ -2,8 +2,8 @@ from __future__ import absolute_import
 from __future__ import division
 from __future__ import print_function
 
-from .ScenarioDataset import ScenarioDatasetAPI
-from .MultiAgentEnv import MultiAgentEnv
+from ScenarioDataset import ScenarioDatasetAPI
+from MultiAgentEnv import MultiAgentEnv
 import numpy as np
 import skimage.draw as skd
 
@@ -40,7 +40,7 @@ class ScenarioSimulator(MultiAgentEnv):
         self.DesiredMatrix = np.zeros(self.ScenarioDim, dtype=np.int8)
 
         # Encoded action index matrix to encode and decode actions
-        self.EncodeActionMatrix = np.reshape(np.arange(0, self.ScenarioDim[0]*self.ScenarioDim[1]), self.ScenarioDim)
+        # self.EncodeActionMatrix = np.reshape(np.arange(0, self.ScenarioDim[0]*self.ScenarioDim[1]), self.ScenarioDim)
         
         
         # Randomly deploy sensors immediately and store random sensor deployments
@@ -61,7 +61,24 @@ class ScenarioSimulator(MultiAgentEnv):
         self.n_agents = len(self.Sensors.keys())
 
         # self.n_actions = len(self.get_avail_agent_actions(0))
-        self.n_actions = self.ScenarioDim[0]*self.ScenarioDim[1]
+        self.n_actions = 5
+        radius = self.SenseData.MoveRange
+        f = 1-radius
+        ddf_x = 1
+        ddf_y = -2*radius
+        x = 0
+        y = radius
+        while x < y:
+            if f >= 0:
+                y -= 1
+                ddf_y += 2
+                f += ddf_y
+
+            x+= 1
+            ddf_x += 2
+            f += ddf_x
+            self.n_actions += 8
+
 
         self.action_space = []
         self.observation_space = []
@@ -112,15 +129,17 @@ class ScenarioSimulator(MultiAgentEnv):
 
         for id, act in enumerate(actions):
             # Decode the actions
-            action = np.where(self.EncodeActionMatrix == act)
+            # action = np.where(self.EncodeActionMatrix == act)
             # action = (action[1], action[0])
             # print(action)
 
 
             zeroCostAction = [self.Sensors[id].Position.yPos, 
                               self.Sensors[id].Position.xPos]
+
+            action = self.return_raw_actions(id)[act]
             # If the action is invalid because it has been taken by another sensor 
-            # then dont move
+            # then don't move
             # print(self.DeploymentField)
             if self.DeploymentField[action[0], action[1]] != 0 \
                 or self.Sensors[id].RemainingPower == 0:
@@ -270,12 +289,8 @@ class ScenarioSimulator(MultiAgentEnv):
             
         
         return [self.get_avail_agent_actions(id) for id in self.Sensors.keys()]
-    
-    def get_avail_agent_actions(self, agentID):
-        '''
-        Function returns an action list that contains valid movement positions
-        for the sensor with the id agentID
-        '''
+
+    def return_raw_actions(self, agentID):
         actionList = []
         # We will use the midpoint-circle algorithm to calculate valid action indices
         sensor = self.Sensors[agentID]
@@ -299,13 +314,13 @@ class ScenarioSimulator(MultiAgentEnv):
         actionList.append([xPos-radius, yPos])
 
         while x < y:
-            if f >= 0: 
+            if f >= 0:
                 y -= 1
                 ddf_y += 2
                 f += ddf_y
             x += 1
             ddf_x += 2
-            f += ddf_x    
+            f += ddf_x
             actionList.append([xPos + x, yPos + y])
             actionList.append([xPos - x, yPos + y])
             actionList.append([xPos + x, yPos - y])
@@ -314,58 +329,85 @@ class ScenarioSimulator(MultiAgentEnv):
             actionList.append([xPos - y, yPos + x])
             actionList.append([xPos + y, yPos - x])
             actionList.append([xPos - y, yPos - x])
-            
+
         # Trim the actions list to only account for valid movements
         # print("action list: ", actionList)
         # print("trimmed: " trimmedActions)
         trimmedActions = \
-            np.clip(actionList, [0, 0], [self.ScenarioDim[1]-1, self.ScenarioDim[0]-1])
-        # print(trimmedActions.shape)
-        # normalize
+            np.clip(actionList, [0, 0], [self.ScenarioDim[0]-1, self.ScenarioDim[1]-1])
+
         if len(trimmedActions.shape) == 3:
             trimmedActions = [[a[0, 0], a[1, 0]] for a in trimmedActions]
 
-        # print(trimmedActions)
         trimmedActions = [a for a in trimmedActions if self.DeploymentField[a[0], a[1]] == 0]
+
+        while(len(trimmedActions) < self.n_actions):
+            trimmedActions.append(zeroCostAction)
+
+        return trimmedActions
+
+    def get_avail_agent_actions(self, agentID):
+        '''
+        Function returns an action list that contains valid movement positions
+        for the sensor with the id agentID
+        '''
+        act_list = self.return_raw_actions(agentID)
+        zero_cost = [self.Sensors[agentID].Position.yPos, self.Sensors[agentID].Position.xPos]
+        # print(trimmedActions.shape)
+
+        final_acts = []
+        for i in range(0, len(act_list)):
+            if list(act_list[i]) == list(zero_cost):
+                final_acts.append(0)
+            else:
+                final_acts.append(i)
+        # normalize
+
+
+        # print(trimmedActions)
+
     
         # Size normalization Difference
 
         # Variable to trim actions more by their distance and quadrant
         TrimByDistance = False
 
-        if TrimByDistance:
-            diff = len(actionList) - len(trimmedActions)
-            # Calculate max action length by shortening the list by a predetermined factor
-            maxActionLength = (len(trimmedActions)+diff) // 4
-
-            # Make a list of tuples containing the distance of the action from the foi centroid and the action itself
-            distanceAndAction = [(np.sqrt((a[0]-self.foi_centroid[0])**2 + 
-                                        (a[1]-self.foi_centroid[1])**2),
-                                a) for a in trimmedActions]
-            # Sort the (distance, action) tuples by the distance
-            sortedActions = sorted(distanceAndAction, key=lambda tup: tup[0])
-            # Use the max action length to put the maxActionLength shortest distances
-            trimmedActions = [sortedActions[i][1] for i in range(maxActionLength)]
+        # if TrimByDistance:
+        #     diff = len(actionList) - len(trimmedActions)
+        #     # Calculate max action length by shortening the list by a predetermined factor
+        #     maxActionLength = (len(trimmedActions)+diff) // 4
+        #
+        #     # Make a list of tuples containing the distance of the action from the foi centroid and the action itself
+        #     distanceAndAction = [(np.sqrt((a[0]-self.foi_centroid[0])**2 +
+        #                                 (a[1]-self.foi_centroid[1])**2),
+        #                         a) for a in trimmedActions]
+        #     # Sort the (distance, action) tuples by the distance
+        #     sortedActions = sorted(distanceAndAction, key=lambda tup: tup[0])
+        #     # Use the max action length to put the maxActionLength shortest distances
+        #     trimmedActions = [sortedActions[i][1] for i in range(maxActionLength)]
         # print(trimmedActions)
 
         # Encode the actions
-        trimmedActions = [self.EncodeActionMatrix[a[1], a[0]] for a in trimmedActions]
-        
-        trimMod = self.n_actions % len(trimmedActions)
+        # trimmedActions = [self.EncodeActionMatrix[a[1], a[0]] for a in trimmedActions]
+        # while len(act_list < self.n_actions):
+        #     act_list.append(zero_cost)
+        # trimMod = self.n_actions % len(trimmedActions)
+
+
 
         # print(len(trimmedActions))
         # print(trimMod)
 
         # print(trimMod)
-        finalActions = []
+        # finalActions = []
 
-        trimAmnt = len(trimmedActions)
-        while trimAmnt+trimMod < self.n_actions:
-            finalActions.extend(trimmedActions)
-            trimAmnt = len(finalActions)
+        # trimAmnt = len(trimmedActions)
+        # while trimAmnt+trimMod < self.n_actions:
+        #     finalActions.extend(trimmedActions)
+        #     trimAmnt = len(finalActions)
 
-        for i in range(trimMod):
-            finalActions.append(trimmedActions[i])
+        # for i in range(trimMod):
+        #     finalActions.append(trimmedActions[i])
     
         # print(np.shape(trimmedActions))
 
@@ -378,7 +420,7 @@ class ScenarioSimulator(MultiAgentEnv):
 
         # Return only the trimmed valid movements that are available positions
         # according to the deployment field
-        return finalActions
+        return final_acts
     
     def get_total_actions(self):
         return len(self.get_avail_actions())
